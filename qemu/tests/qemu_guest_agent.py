@@ -16,6 +16,7 @@ from virttest import guest_agent
 from virttest import utils_misc
 from virttest import utils_disk
 from virttest import env_process
+from virttest import utils_net
 
 
 class BaseVirtTest(object):
@@ -752,44 +753,137 @@ class QemuGuestAgentBasicCheck(QemuGuestAgentTest):
     def gagent_check_get_interfaces(self, test, params, env):
         """
         Execute "guest-network-get-interfaces" command to guest agent
+
+        Steps:
+        1) login guest with serial session
+        2) get the available interface name via mac address
+        3) check the available interface name is the same with guest
+        4) check ip address is the same with guest
+        5) set down/up the interface in guest
+        6) check "guest-network-get-interfaces" result
+        7) change ip address
+        8) check "guest-network-get-interfaces" result
+
         :param test: kvm test object
         :param params: Dictionary with the test parameters
         :param env: Dictionary with test environment.
         """
-        def find_interface_by_name(interface_list, target_interface):
+        def get_interface_attr(ret_list, mac_addr):
             """
-            find the specific network interface in the interface list return
-            by guest agent. return True if find successfully
-            """
-            for interface in interface_list:
-                if target_interface == interface["name"]:
-                    return True
-            return False
-        session = self._get_session(params, None)
+            Get the available interface name.
 
-        # check if the cmd "guest-network-get-interfaces" work
+            :return: interface name and the interface's index in ret_list
+            """
+            interface_name = ""
+            index_if = 0
+            for interface in ret_list:
+                if "hardware-address" in interface and \
+                                interface["hardware-address"] == mac_addr:
+                    interface_name = interface["name"]
+                    break
+                index_if += 1
+            return interface_name, index_if
+
+        def ip_addr_check(ret_list, index_if, interface_name):
+            """
+            Check the ip address from qga.
+
+            :param ret_list: return list from qga
+            :param index_if: the interface's index in ret
+            :param interface_name: interface name
+            """
+            ip_lists = ret_list[index_if]["ip-addresses"]
+            index_ip = 0
+            for ip in ip_lists:
+                if ip["ip-address-type"] == "ipv4":
+                    ip_addr_qga = ip_lists[index_ip]["ip-address"]
+                    break
+                index_ip += 1
+            guest_ip_addr = self.vm.get_address()
+            if ip_addr_qga != guest_ip_addr:
+                test.fail("Get the wrong ip address for %s interface,"
+                          " value from qga is %s, the expected one is %s"
+                          % (interface_name, ip_addr_qga,
+                             guest_ip_addr))
+
+        def manage_guest_nic(session, ifname, disabled=True):
+            """
+            Enable or disable guest nic.
+
+            :param session: VM session
+            :param ifname: network interface
+            :param disabled: whether disable the interface
+            """
+            os_type = params.get("os_type", "linux")
+            if os_type == "linux":
+                down_cmd = "ip link set %s" % ifname
+                if disabled:
+                    down_cmd += " down"
+                else:
+                    down_cmd += " up"
+                session.cmd(down_cmd)
+                time.sleep(10)
+            else:
+                if disabled:
+                    utils_net.disable_windows_guest_network(session, ifname)
+                else:
+                    utils_net.enable_windows_guest_network(session, ifname)
+
+        session_serial = self.vm.wait_for_serial_login()
+        mac_addr = self.vm.get_mac_address()
+        error_context.context("Check if 'guest-network-get-interfaces' works",
+                              logging.info)
         ret = self.gagent.get_network_interface()
-        if not find_interface_by_name(ret, "lo"):
-            test.fail("didn't find 'lo' interface in the return value")
+        interface_name, index_if = get_interface_attr(ret, mac_addr)
+        if not interface_name:
+            test.fail("Did not get the expected interface,"
+                      " the network info is \n%s." % ret)
 
-        error_context.context("set down the interface: lo", logging.info)
-        down_interface_cmd = "ip link set lo down"
-        session.cmd(down_interface_cmd)
+        # check the available interface name is the same with guest.
+        if self.params.get("os_type") == "linux":
+            interface_name_guest = utils_net.get_linux_ifname(session_serial, mac_addr)
+        else:
+            interface_name_guest = utils_net.get_windows_nic_attribute(session_serial,
+                                                                       "macaddress",
+                                                                       mac_addr,
+                                                                       "netconnectionid")
+        if interface_name != interface_name_guest:
+            test.fail("Get the wrong interface name, value from qga is: %s; "
+                      "the expected is: %s" % (interface_name, interface_name_guest))
 
-        interfaces_pre_add = self.gagent.get_network_interface()
+        # check ip address is the same with guest
+        ip_addr_check(ret, index_if, interface_name)
 
-        error_context.context("add the new device bridge in guest", logging.info)
-        add_brige_cmd = "ip link add link lo name lo_brige type bridge"
-        session.cmd(add_brige_cmd)
+        # set down/up the interface
+        error_context.context("Set down the interface in guest.", logging.info)
+        manage_guest_nic(session_serial, interface_name, disabled=True)
+        ret_after_down = self.gagent.get_network_interface()
+        interface_name_down, index_if_down = get_interface_attr(ret_after_down,
+                                                                mac_addr)
+        if interface_name_down:
+            test.fail("From qga result that the interface is still enabled,"
+                      " detailed info is:\n %s" % ret_after_down)
 
-        interfaces_after_add = self.gagent.get_network_interface()
+        error_context.context("Set up the interface in guest.", logging.info)
+        manage_guest_nic(session_serial, interface_name, disabled=False)
+        ret_after_up = self.gagent.get_network_interface()
+        interface_name_up, index_if_up = get_interface_attr(ret_after_up, mac_addr)
+        if not interface_name_up:
+            test.fail("From qga result that the interface is still disabled,"
+                      " detailed info is:\n %s" % ret_after_up)
 
-        bridge_list = [_ for _ in interfaces_after_add if _ not in
-                       interfaces_pre_add]
-        if (len(bridge_list) != 1) or \
-           ("lo_brige" != bridge_list[0]["name"]):
-            test.fail("the interface list info after interface was down "
-                      "was not as expected")
+        # change ip address
+        error_context.context("Change ip address.", logging.info)
+        cmd_ipaddr_change = params["cmd_ipaddr_change"] % interface_name
+        session_serial.cmd(cmd_ipaddr_change)
+        utils_net.update_mac_ip_address(self.vm)
+        ret_ip_change = self.gagent.get_network_interface()
+        interface_name_ip_change, index_if_ip_change = get_interface_attr(ret_ip_change,
+                                                                          mac_addr)
+        ip_addr_check(ret_ip_change, index_if_ip_change, interface_name_ip_change)
+
+        if session_serial:
+            session_serial.close()
 
     def gagent_check_reboot_shutdown(self, test, params, env):
         """
