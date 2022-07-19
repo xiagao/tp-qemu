@@ -1,5 +1,6 @@
 import os
 import re
+import time
 
 import aexpect
 
@@ -100,6 +101,32 @@ def run(test, params, env):
         if status:
             return False
         return "autoit3" not in output.lower()
+
+    def viofs_svc_create(cmd):
+        """
+        Only for windows guest, to create a virtiofs service.
+
+        :param cmd: cmd to create virtiofs service
+        """
+        test.log.info("Register virtiofs service in Windows guest.")
+        exe_path = get_viofs_exe(session)
+        sc_create_s, sc_create_o = session.cmd_status_output(cmd % exe_path)
+        if sc_create_s != 0:
+            test.fail("Failed to register virtiofs service, output is %s" % sc_create_o)
+
+    def viofs_svc_stop_start(action, cmd):
+        """
+        Only for windows guest, to start/stop VirtioFsSvc.
+
+        :param action: stop or start.
+        :param cmd: cmd to start or stop virtiofs service
+        """
+        error_context.context("Try to %s VirtioFsSvc service." % action,
+                              test.log.info)
+        status, ouput = session.cmd_status_output(cmd)
+        if status != 0:
+            test.fail("Could not %s VirtioFsSvc service, "
+                      "detail: '%s'" % (action, output))
 
     # data io config
     test_file = params.get('test_file')
@@ -291,25 +318,20 @@ def run(test, params, env):
                 error_context.context("Start virtiofs service in guest.", test.log.info)
                 viofs_sc_create_cmd = params["viofs_sc_create_cmd"]
                 viofs_sc_start_cmd = params["viofs_sc_start_cmd"]
+                viofs_sc_stop_cmd = params["viofs_sc_stop_cmd"]
                 viofs_sc_query_cmd = params["viofs_sc_query_cmd"]
+
 
                 test.log.info("Check if virtiofs service is registered.")
                 status, output = session.cmd_status_output(viofs_sc_query_cmd)
                 if "not exist as an installed service" in output:
-                    test.log.info("Register virtiofs service in windows guest.")
-                    exe_path = get_viofs_exe(session)
-                    viofs_sc_create_cmd = viofs_sc_create_cmd % exe_path
-                    sc_create_s, sc_create_o = session.cmd_status_output(viofs_sc_create_cmd)
-                    if sc_create_s != 0:
-                        test.fail("Failed to register virtiofs service, output is %s" % sc_create_o)
+                    viofs_svc_create(viofs_sc_create_cmd)
 
                 test.log.info("Check if virtiofs service is started.")
                 status, output = session.cmd_status_output(viofs_sc_query_cmd)
                 if "RUNNING" not in output:
                     test.log.info("Start virtiofs service.")
-                    sc_start_s, sc_start_o = session.cmd_status_output(viofs_sc_start_cmd)
-                    if sc_start_s != 0:
-                        test.fail("Failed to start virtiofs service, output is %s" % sc_start_o)
+                    viofs_svc_stop_start("start", viofs_sc_start_cmd)
                 else:
                     test.log.info("Virtiofs service is running.")
 
@@ -387,6 +409,11 @@ def run(test, params, env):
                     finally:
                         if os_type == "linux":
                             session.cmd("cd -")
+                        else:
+                            # there is no exit status for this cmd,so when getting
+                            # the exit status, it actually get the status of last cmd.
+                            # So use sendline function here.
+                            session.sendline("C:")
 
                 if cmd_symblic_file:
                     error_context.context("Symbolic test under %s inside "
@@ -398,6 +425,11 @@ def run(test, params, env):
                         test.fail("Creat symbolic folders failed.")
                     if os_type == "linux":
                         session.cmd("cd -")
+                    else:
+                        # there is no exit status for this cmd,so when getting
+                        # the exit status, it actually get the status of last cmd.
+                        # So use sendline function here.
+                        session.sendline("C:")
 
                 if fio_options:
                     error_context.context("Run fio on %s." % fs_dest, test.log.info)
@@ -492,7 +524,6 @@ def run(test, params, env):
                                 lambda: is_autoit_finished(session, autoit_name), 360, 60, 5)
                     error_context.context("Git init test in %s" % fs_dest, test.log.info)
                     status, output = session.cmd_status_output(git_init_cmd % fs_dest)
-
                     if status:
                         test.fail("Git init failed with %s" % output)
 
@@ -515,6 +546,24 @@ def run(test, params, env):
                         for line in f.readlines():
                             if re.match(pattern, line, re.I):
                                 test.fail("CreateDirectory cause virtiofsd-rs ERROR reply.")
+
+                if params.get("stop_start_repeats") and os_type == "windows":
+                    repeats = int(params.get("stop_start_repeats", 1))
+                    for i in range(repeats):
+                        error_context.context("Repeat stop/start VirtioFsSvc:"
+                                              " %s/%s" % (i + 1, repeats),
+                                              test.log.info)
+                        viofs_svc_stop_start("stop", viofs_sc_stop_cmd)
+                        time.sleep(1)
+                        viofs_svc_stop_start("start", viofs_sc_start_cmd)
+                        time.sleep(1)
+                    error_context.context("Basic IO test after"
+                                          " repeat stop/start virtiofs"
+                                          " service.", test.log.info)
+                    s, o = session.cmd_status_output(cmd_dd % guest_file, io_timeout)
+                    if s:
+                        test.fail("IO test failed, the output is %s" % o)
+
             finally:
                 if os_type == "linux":
                     utils_disk.umount(fs_target, fs_dest, 'virtiofs', session=session)
