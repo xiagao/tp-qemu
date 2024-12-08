@@ -72,6 +72,7 @@ def run(test, params, env):
 
         test.log.info("Enable VBS...")
         time.sleep(2)
+        execute_powershell_command(executionPolicy_command)
         output_enable = execute_powershell_command(enable_command)
         test.log.info("DG enable output: %s" % output_enable)
         time.sleep(2)
