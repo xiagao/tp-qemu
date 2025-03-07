@@ -1,7 +1,6 @@
-import time
-
 from virttest import env_process
 from virttest import data_dir
+import time
 
 
 def run(test, params, env):
@@ -22,27 +21,27 @@ def run(test, params, env):
     :param env: Dictionary with test environment.
     """
 
-    def execute_powershell_command(command, timeout=60):
+    def execute_powershell_command(command, timeout=180):
         status, output = session.cmd_status_output(command, timeout)
         if status != 0:
             test.fail("execute command fail: %s" % output)
         return output
 
     login_timeout = int(params.get("login_timeout", 360))
-    params["ovmf_vars_filename"] = "OVMF_VARS.secboot.fd"
-    params["start_vm"] = "yes"
-    env_process.preprocess_vm(test, params, env, params["main_vm"])
+    params["ovmf_vars_filename"] = 'OVMF_VARS.secboot.fd'
+    params["start_vm"] = 'yes'
+    env_process.preprocess_vm(test, params, env, params['main_vm'])
     vm = env.get_vm(params["main_vm"])
     session = vm.wait_for_serial_login(timeout=login_timeout)
 
-    check_cmd = params["check_secure_boot_enabled_cmd"]
-    dgreadiness_path_command = params["dgreadiness_path_command"]
-    executionPolicy_command = params["executionPolicy_command"]
-    enable_command = params["enable_command"]
-    disable_command = params["disable_command"]
-    ready_command = params["ready_command"]
-    dg_command = params["dg_command"]
-    check_ready_info = params["check_ready_info"]
+    check_cmd = params['check_secure_boot_enabled_cmd']
+    dgreadiness_path_command = params['dgreadiness_path_command']
+    executionPolicy_command = params['executionPolicy_command']
+    enable_command = params['enable_command']
+    disable_command = params['disable_command']
+    ready_command = params['ready_command']
+    dg_command = params['dg_command']
+    check_ready_info = params['check_ready_info']
 
     try:
         output = session.cmd_output(check_cmd)
@@ -65,20 +64,19 @@ def run(test, params, env):
         execute_powershell_command(executionPolicy_command)
         output = execute_powershell_command(ready_command)
         test.log.info("DG ready output: %s" % output)
-        # output = execute_powershell_command(dg_command)
-        # test.log.info("DG get output: %s" % output)
+        #output = execute_powershell_command(dg_command)
+        #test.log.info("DG get output: %s" % output)
         if check_ready_info in output:
             test.log.info("VBS is already enabled, and guest boot up successfully")
             return
 
         test.log.info("Enable VBS...")
         time.sleep(2)
-        execute_powershell_command(executionPolicy_command)
         output_enable = execute_powershell_command(enable_command)
         test.log.info("DG enable output: %s" % output_enable)
         time.sleep(2)
-        # output = execute_powershell_command(ready_command)
-        # test.log.info("DG ready output: %s" % output)
+        #output = execute_powershell_command(ready_command)
+        #test.log.info("DG ready output: %s" % output)
         time.sleep(2)
         output = execute_powershell_command(dg_command)
         test.log.info("DG get output: %s" % output)
@@ -102,8 +100,8 @@ def run(test, params, env):
         test.log.info("Disable vbs...")
         output = execute_powershell_command(disable_command)
         test.log.info("DG disable output: %s" % output)
-        # output = execute_powershell_command(ready_command)
-        # test.log.info("DG ready output: %s" % output)
+        #output = execute_powershell_command(ready_command)
+        #test.log.info("DG ready output: %s" % output)
         output = execute_powershell_command(dg_command)
         test.log.info("DG get output: %s" % output)
 
